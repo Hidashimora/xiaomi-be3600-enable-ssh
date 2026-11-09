@@ -23,7 +23,7 @@ The guide documents **what we actually did**, including the dead ends and the tw
 ## Table of contents (English)
 
 - [What you get](#what-you-get)
-- [⚠️ Read this first](#️-read-this-first)
+- [Read this first](#read-this-first)
 - [Tested devices & firmware](#tested-devices--firmware)
 - [Prerequisites](#prerequisites)
 - [TL;DR](#tldr)
@@ -62,7 +62,7 @@ custom firewall rules, or simply understanding what your router does.
 
 ---
 
-## ⚠️ Read this first
+## Read this first
 
 - **Your own device only.** The normal path requires the router's WEB admin password, which is
   itself an authorization gate. Do not run this against hardware you do not own.
@@ -555,7 +555,7 @@ BE3600 Pro (RD15 / RP01 / RP02) со стоковой прошивкой MiWiFi*
 ## Содержание (русский)
 
 - [Что получится](#что-получится)
-- [⚠️ Прочитать до начала](#️-прочитать-до-начала)
+- [Прочитать до начала](#прочитать-до-начала)
 - [Проверенные устройства и прошивки](#проверенные-устройства-и-прошивки)
 - [Что понадобится](#что-понадобится)
 - [Кратко (TL;DR)](#кратко-tldr)
@@ -590,7 +590,7 @@ BE3600 Pro (RD15 / RP01 / RP02) со стоковой прошивкой MiWiFi*
 Обычные применения: VPN/прокси-клиент (Xray, sing-box), фильтрация DNS, учёт трафика, свои правила
 фаервола — или просто понять, что делает ваш роутер.
 
-## ⚠️ Прочитать до начала
+## Прочитать до начала
 
 - **Только своё устройство.** Штатный путь требует пароль веб-панели — это и есть «порог
   авторизации». Не применяйте это к чужому железу.
