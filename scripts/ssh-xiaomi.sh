@@ -6,9 +6,9 @@
 # mandatory - without them you get "no matching host key type found. Their offer: ssh-rsa".
 #
 # Usage:
-#   ./ssh-xiaomi.sh                  # default 192.168.31.1
-#   ./ssh-xiaomi.sh 10.0.0.1     # custom address (e.g. after changing the LAN subnet)
-#   ./ssh-xiaomi.sh 192.168.31.1 id  # run a single command and exit
+#   sh scripts/ssh-xiaomi.sh                  # default 192.168.31.1
+#   sh scripts/ssh-xiaomi.sh 10.0.0.1         # custom address (e.g. after changing the LAN subnet)
+#   sh scripts/ssh-xiaomi.sh 192.168.31.1 id  # run a single command and exit
 
 set -eu
 
