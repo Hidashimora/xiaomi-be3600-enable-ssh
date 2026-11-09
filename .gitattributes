@@ -1,0 +1,4 @@
+# Keep everything LF: shell scripts must stay LF to run on the router/macOS/Linux.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
