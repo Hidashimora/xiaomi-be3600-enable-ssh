@@ -71,6 +71,9 @@ custom firewall rules, or simply understanding what your router does.
 - **Warranty** is likely void. **Brick risk exists** — back up the flash before you start
   (see [upstream backup guide](https://github.com/perrywey/xiaomi-rp01-root)).
 - **Never expose SSH to the internet.** Keep port 22 on the LAN side only.
+- **`--telnet` opens a passwordless root shell.** The upstream flag starts `telnetd -l /bin/sh`
+  on port 23 with no password at all. Use it only on a LAN you trust, as a last resort, and
+  stop it right afterwards (`killall telnetd`).
 - **The factory root password is derivable from the serial number** printed on the sticker
   (see [how to derive it](#derive-the-factory-root-password-offline)).
   Treat your SN like a secret and **change the root password immediately** after logging in.
@@ -102,7 +105,8 @@ The router we used reports itself as `OpenWrt 18.06-SNAPSHOT`, `ipq53xx/ipq53xx_
 |---|---|
 | Router: Xiaomi BE3600 / BE3600 Pro | — |
 | A computer on the **same LAN** as the router | Wi-Fi or Ethernet |
-| Python 3 (standard library only) | python.org / your package manager |
+| Python 3 | python.org / your package manager. `scripts/xiaomi-default-root-password.py` uses **only the standard library** |
+| Python package `requests` | needed only by the **upstream exploit** (`tools/exploit_set_macfilter_rules.py` imports it and exits asking for it): `pip3 install requests` |
 | **WEB admin password** | the one you set during initial setup — **not** the Wi-Fi password, **not** your Mi account password |
 | **Serial number (SN)** | sticker on the bottom, format `12345/A1B2C3D4E5F6` — **the slash is part of the SN** |
 
@@ -115,11 +119,15 @@ Python 3 and an `ssh` client works.
 
 ```bash
 # 0. Same LAN as the router. Default router address is 192.168.31.1.
+#    The scripts below come from THIS repo - clone it first:
+git clone https://github.com/Hidashimora/xiaomi-be3600-enable-ssh.git
+cd xiaomi-be3600-enable-ssh
 
-# 1. Derive the factory root password from your SN (offline)
+# 1. Derive the factory root password from your SN (offline; standard library only)
 python3 scripts/xiaomi-default-root-password.py 12345/A1B2C3D4E5F6
 
-# 2. Open SSH (needs your WEB admin password)
+# 2. Open SSH (needs your WEB admin password; the upstream exploit needs `requests`)
+pip3 install requests
 git clone https://github.com/perrywey/xiaomi-rp01-root.git
 cd xiaomi-rp01-root
 python3 tools/exploit_set_macfilter_rules.py --ip 192.168.31.1 --password 'YOUR_WEB_ADMIN_PASSWORD'
@@ -156,7 +164,8 @@ curl -s -o /dev/null -w '%{http_code}\n' http://192.168.31.1/   # 200 = panel is
 ### 2. Get the router's WEB admin password
 
 It is the password of the web panel at `http://192.168.31.1` — **not** the Wi-Fi key. If you never
-set one, the exploit script tries an empty password first, which often works.
+set one, the upstream script asks for it interactively: type an empty password yourself (just
+press Enter).
 
 ### 3. Clone the exploit
 
@@ -165,7 +174,9 @@ git clone https://github.com/perrywey/xiaomi-rp01-root.git
 cd xiaomi-rp01-root
 ```
 
-Everything below uses that project's `tools/exploit_set_macfilter_rules.py`.
+Everything below uses that project's `tools/exploit_set_macfilter_rules.py`. It imports
+`requests`, so install it first: `pip3 install requests` (our own password calculator needs
+nothing beyond the standard library).
 
 ### 4. First injection: SSH opens (and nginx answers 502)
 
@@ -293,13 +304,18 @@ Note: with an RSA key you must also allow it on the client side
 
 This is the part people get wrong. On this platform:
 
-| Filesystem | Survives reboot? |
-|---|---|
-| `/etc` (and `/etc/dropbear`, `/root/.ssh`) | ❌ **RAM filesystem — wiped** |
-| `/data` (ubifs) | ✅ yes |
-| `nvram` | ✅ yes |
-| `/etc/crontabs` | ✅ yes (bind-mounted to `/data/etc/crontabs`) |
-| `/etc/shadow`, `/etc/passwd` | ✅ yes (bind-mounted from `/data/etc`) |
+| Path | Survives reboot? | Why |
+|---|---|---|
+| `/data` (ubifs) | ✅ yes | the only writable persistent filesystem |
+| `nvram` (`ssh_en`, `telnet_en`) | ✅ yes | separate partition |
+| `/etc/crontabs` | ✅ yes | preinit bind-mounts it from `/data/etc/crontabs` |
+| `/etc/shadow`, `/etc/passwd` | ✅ yes | preinit bind-mounts them from `/data/etc`, so `passwd root` lands in `/data/etc/shadow` |
+| uci config (`/etc/config/*`) | ✅ yes | stored on the persistent partition, applied from boot |
+| `/etc/dropbear/dropbear_rsa_host_key` | ❌ no | `/etc` is a ramfs |
+| `/etc/dropbear/authorized_keys`, `/root/.ssh/authorized_keys` | ❌ no | `/etc` and `/root` are ramfs |
+| `/etc/TZ` | ❌ no | ramfs — the timezone reverts (ours went back to `CST`) |
+| raw `iptables` rules | ❌ no | `fw3 reload` flushes them |
+| the running `dropbear` process | ❌ no | the process is gone |
 
 So the host key and `authorized_keys` must be stored in `/data` and restored at boot. We keep them
 in `/data/root_secret/` and run a one-minute cron watchdog:
@@ -342,9 +358,38 @@ netstat -ltn | grep ':22 '
 # tcp  0  0  0.0.0.0:22  0.0.0.0:*  LISTEN
 ```
 
-> The upstream project ships an equivalent `boot.sh` + crontab block; use whichever you prefer.
-> Our version adds the `/etc/shadow` restore, because we hit a case where the password did not come
-> back after a reboot.
+> **Why the watchdog exists.** `/etc` is a RAM filesystem and is wiped on reboot — with one
+> important exception: preinit bind-mounts `/data/etc/passwd`, `/data/etc/shadow` and
+> `/data/etc/crontabs` into `/etc`. So your **root password does survive** a reboot (it lives
+> in `/data/etc/shadow`), and so does the crontab. But the dropbear **host key**,
+> `authorized_keys` and `/etc/TZ` do **not**, and the dropbear **process** does not.
+>
+> One caveat: the `/data/etc/shadow` bind-mount only carries your hash once that file exists.
+> Until then `/etc/shadow` still holds the factory hash and the password can come back
+> factory-fresh after a reboot. The watchdog closes that gap — it keeps a copy in
+> `/data/root_secret/shadow_root` and writes it back when the hashes differ.
+
+> **Lost SSH completely?** You do not need a shell to get it back: the exploit runs commands as
+> root over HTTP. Re-run it with `--cmd`, restore the files from `/data/root_secret` and start
+> dropbear again (the nginx `502` once more does not mean failure):
+
+```bash
+python3 tools/exploit_set_macfilter_rules.py --ip 192.168.31.1 \
+    --password 'YOUR_WEB_ADMIN_PASSWORD' \
+    --cmd 'mkdir -p /etc/dropbear /root/.ssh
+cp /data/root_secret/dropbear_rsa_host_key /etc/dropbear/
+cp /data/root_secret/authorized_keys /etc/dropbear/authorized_keys
+cp /data/root_secret/authorized_keys /root/.ssh/authorized_keys
+/usr/sbin/dropbear -p 22
+sh /data/ssh-boot.sh'
+```
+
+> Then check `nc -vz 192.168.31.1 22` and log in; `/data/ssh-boot.sh` also writes the root hash
+> back into `/etc/shadow`.
+
+> **Key-only logins.** The boot script starts dropbear as `/usr/sbin/dropbear -p 22`, i.e. **with**
+> password logins enabled — which would silently undo key-only within a minute. How to keep
+> key-only: see the note at the end of step 10.
 
 ### 10. Harden: OTA off, telnet off, no WAN exposure
 
@@ -355,14 +400,46 @@ sed -i '/otapredownload/d' /etc/crontabs/root
 uci add_list dhcp.@dnsmasq[0].address='/bigota.miwifi.com/0.0.0.0'; uci commit dhcp
 /etc/init.d/dnsmasq restart
 
-# 2) telnet off (only if you enabled it with --telnet)
+# 2) telnet off: `nvram commit` alone only stops it at the NEXT boot, so kill the running daemon too
 nvram set telnet_en=0; nvram commit
+killall telnetd 2>/dev/null
+netstat -ltn | grep ':23 ' || echo 'telnet off'
 
-# 3) SSH must not be reachable from the WAN side — block it explicitly
-iptables -I INPUT -i <YOUR_WAN_IF> -p tcp --dport 22 -j DROP
-
-# 4) optional: key-only SSH (dropbear -s disables password logins)
+# 3) SSH must not be reachable from the WAN side — a native fw3 rule, not a raw iptables insert
+#    (raw rules do not survive a reboot and are flushed by `fw3 reload`)
+uci add firewall rule
+uci set firewall.@rule[-1].name='Block-WAN-SSH'
+uci set firewall.@rule[-1].src='wan'
+uci set firewall.@rule[-1].proto='tcp'
+uci set firewall.@rule[-1].dest_port='22'
+uci set firewall.@rule[-1].target='DROP'
+uci commit firewall
+/etc/init.d/firewall reload
 ```
+
+Verify the rule exists — and, once you are on the LAN, that its counter grows
+(`src='wan'` means the rule only matches traffic arriving on the WAN zone; check the zone if in doubt):
+
+```bash
+uci show firewall | grep -A6 'Block-WAN-SSH'
+iptables -L INPUT -vn | grep 'dpt:22'
+```
+
+> ⚠️ Do **not** add that rule while you administer the router from the WAN side — you will lock
+> yourself out of SSH. Add it from the LAN only.
+
+If you would rather not touch the firewall configuration, you can re-apply the raw rule every
+minute instead — it will then die at each reboot until cron brings it back:
+
+```bash
+echo '* * * * * iptables -C INPUT -i <YOUR_WAN_IF> -p tcp --dport 22 -j DROP || iptables -I INPUT -i <YOUR_WAN_IF> -p tcp --dport 22 -j DROP' >> /etc/crontabs/root
+```
+
+**Key-only SSH (`dropbear -s`).** `-s` disables password logins, but the one-minute watchdog raises
+dropbear as `/usr/sbin/dropbear -p 22` — without `-s`. So key-only is *not* the default state of
+this setup: to keep it, change that line in `/data/ssh-boot.sh` to
+`/usr/sbin/dropbear -p 22 -s`, and make sure `/data/root_secret/authorized_keys` holds a working key
+**before** you restart dropbear (otherwise you lose access; recovery above needs no shell).
 
 Also strongly recommended: **back up the flash** before making changes. On this platform `mtd16`
 (wireless calibration) and `mtd21` (bdata: SN/MAC/keys) cannot be restored from official firmware —
@@ -432,7 +509,7 @@ changed before — fall back to option 1.
 ## How the exploit works
 
 ```
-GET/POST /cgi-bin/luci/;stok=<TOKEN>/api/xqsystem/set_macfilter_rules
+GET  /cgi-bin/luci/;stok=<TOKEN>/api/xqsystem/set_macfilter_rules
          ?mac=<valid MAC>&name=<payload>&option=0
    │
    ├─ handler reads `name` with formvalue("name")      ← no regex validation
@@ -446,7 +523,8 @@ GET/POST /cgi-bin/luci/;stok=<TOKEN>/api/xqsystem/set_macfilter_rules
 Payload rules that matter:
 
 - **No `;`** — the controller splits `mac`/`name` on `;`. Use newlines (the script does).
-- `option` must be `0` (add); `option=1` returns early without executing.
+- `option` must be `0` (add). With `option=1` **and** a MAC that is not already in the
+  filter table the function returns early and executes nothing.
 - `mac` must be a valid MAC that is not already in the MAC-filter table (the script randomizes it).
 - Backticks, `$( )`, `|` and `&` also work if you prefer.
 
@@ -454,8 +532,8 @@ Useful flags of the upstream script:
 
 | Flag | Purpose |
 |---|---|
-| `--probe` | read-only check: makes the router `ping` your computer (proves execution, changes nothing) |
-| `--telnet` | starts `telnetd -l /bin/sh` — a **passwordless root shell**; use only on a trusted LAN |
+| `--probe` | read-only check: makes the router `ping` your computer (proves execution, changes nothing). You have to run `tcpdump`/`windump` yourself (and pass your address with `--target`) to see those packets |
+| `--telnet` | starts `telnetd -l /bin/sh` — a passwordless root shell; read [Read this first](#read-this-first) before using it |
 | `--cmd 'id'` | run an arbitrary command as root |
 | `--no-auth` | skip login (asks you to confirm device ownership first) |
 
@@ -468,11 +546,11 @@ Useful flags of the upstream script:
 | `no matching host key type found. Their offer: ssh-rsa` | your OpenSSH refuses SHA-1 host keys | add `-o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa` |
 | `Permission denied (publickey,password)` with the derived password | wrong/factory-changed password | set your own via `--cmd "... | passwd root"` (step 6) |
 | Exploit returns `502 Bad Gateway` | nginx CGI timeout while `dropbearkey` runs | not a failure — check `nc -vz <IP> 22` |
-| Exploit returns `{"code":1523}` / other error | firmware not vulnerable, or wrong admin password | verify the panel password; try `--no-auth` |
+| Exploit returns any non-zero `code`, e.g. `{"code":1523}` / `{"code":1541}` (we saw these on *other* xqsystem endpoints) | firmware not vulnerable, or wrong admin password | verify the panel password; try `--no-auth` |
 | Port 22 closed after injection | `dropbearkey` failed, or host key placeholder still present | run `--cmd "rm -f /etc/dropbear/dropbear_rsa_host_key; dropbearkey -t rsa -f /etc/dropbear/dropbear_rsa_host_key; /usr/sbin/dropbear -p 22"` |
 | `chpasswd: not found` | not present in this firmware | use `printf 'P\nP\n' | passwd root` |
 | SSH worked, then died after a reboot | `/etc` is a RAM filesystem | install the `/data` restore + cron watchdog (step 9) |
-| Password no longer accepted after a reboot | `/etc/shadow` reverted with `/etc` | restore it from `/data/root_secret/shadow_root` (step 9) |
+| Password no longer accepted after a reboot | `/data/etc/shadow` did not exist yet, so `/etc/shadow` fell back to the factory hash | restore from `/data/root_secret/shadow_root` (step 9), or re-run the exploit with `--cmd` and set the password again |
 | Paramiko/paramiko-based tool cannot connect | ssh-rsa removed from Paramiko 5.x defaults | use the system `ssh` binary |
 | Everything broke after you added iptables rules | custom rules inserted at the top of `FORWARD` crash Qualcomm NSS/ECM (`HLOS Panic` in dmesg) on this platform | never `-I FORWARD 1`; use native firewall rules and re-apply custom chains from cron |
 
@@ -599,6 +677,9 @@ BE3600 Pro (RD15 / RP01 / RP02) со стоковой прошивкой MiWiFi*
 - **Гарантия**, скорее всего, слетит. **Риск «кирпича» есть** — сделайте бэкап флеша до начала
   (см. [бэкап у upstream](https://github.com/perrywey/xiaomi-rp01-root)).
 - **Никогда не выставляйте SSH в интернет.** Порт 22 — только со стороны LAN.
+- **`--telnet` открывает root-shell без пароля.** Этот флаг upstream поднимает
+  `telnetd -l /bin/sh` на порту 23 вообще без пароля. Только в доверенной LAN, как крайний
+  вариант, и сразу гасите (`killall telnetd`).
 - **Заводской root-пароль вычисляется из серийного номера** на наклейке (в этом суть
   [шага про пароль](#как-узнать-пароль-от-ssh)). Относитесь к SN как к секрету и **сразу смените
   root-пароль** после входа.
@@ -626,7 +707,8 @@ BE3600 Pro (RD15 / RP01 / RP02) со стоковой прошивкой MiWiFi*
 |---|---|
 | Роутер Xiaomi BE3600 / BE3600 Pro | — |
 | Компьютер в **той же LAN**, что и роутер | Wi-Fi или кабель |
-| Python 3 (только стандартная библиотека) | python.org / пакетный менеджер |
+| Python 3 | python.org / пакетный менеджер. `scripts/xiaomi-default-root-password.py` использует **только стандартную библиотеку** |
+| Python-пакет `requests` | нужен только **upstream-эксплойту** (`tools/exploit_set_macfilter_rules.py` импортирует его и падает с требованием установить): `pip3 install requests` |
 | **Пароль веб-панели** | тот, что вы задали при настройке — **не** пароль Wi-Fi и **не** пароль Mi-аккаунта |
 | **Серийный номер (SN)** | наклейка снизу, формат `12345/A1B2C3D4E5F6` — **слэш входит в SN** |
 
@@ -637,11 +719,15 @@ BE3600 Pro (RD15 / RP01 / RP02) со стоковой прошивкой MiWiFi*
 
 ```bash
 # 0. Компьютер в той же LAN. Адрес роутера по умолчанию — 192.168.31.1.
+#    Скрипты ниже берутся из ЭТОГО репозитория — сначала клонируйте его:
+git clone https://github.com/Hidashimora/xiaomi-be3600-enable-ssh.git
+cd xiaomi-be3600-enable-ssh
 
-# 1. Считаем заводской root-пароль из SN (офлайн)
+# 1. Считаем заводской root-пароль из SN (офлайн; только стандартная библиотека)
 python3 scripts/xiaomi-default-root-password.py 12345/A1B2C3D4E5F6
 
-# 2. Открываем SSH (нужен пароль веб-панели)
+# 2. Открываем SSH (нужен пароль веб-панели; upstream-эксплойту нужен `requests`)
+pip3 install requests
 git clone https://github.com/perrywey/xiaomi-rp01-root.git
 cd xiaomi-rp01-root
 python3 tools/exploit_set_macfilter_rules.py --ip 192.168.31.1 --password 'ПАРОЛЬ_ВЕБ_ПАНЕЛИ'
@@ -674,8 +760,8 @@ curl -s -o /dev/null -w '%{http_code}\n' http://192.168.31.1/   # 200 = пане
 
 ### 2. Пароль веб-панели
 
-Это пароль панели `http://192.168.31.1` — **не** пароль Wi-Fi. Если пароль не задавали, скрипт
-сначала попробует пустой — часто срабатывает.
+Это пароль панели `http://192.168.31.1` — **не** пароль Wi-Fi. Если пароль не задавали,
+upstream-скрипт спросит его интерактивно — пустой пароль нужно ввести самому (нажать Enter).
 
 ### 3. Клонируем эксплойт
 
@@ -684,7 +770,9 @@ git clone https://github.com/perrywey/xiaomi-rp01-root.git
 cd xiaomi-rp01-root
 ```
 
-Дальше используется их `tools/exploit_set_macfilter_rules.py`.
+Дальше используется их `tools/exploit_set_macfilter_rules.py`. Он импортирует `requests`,
+поэтому сначала поставьте его: `pip3 install requests` (нашему калькулятору пароля ничего,
+кроме стандартной библиотеки, не нужно).
 
 ### 4. Первая инъекция: SSH открылся (а nginx ответил 502)
 
@@ -811,13 +899,18 @@ chmod 700 /root/.ssh; chmod 600 /root/.ssh/authorized_keys /etc/dropbear/authori
 
 Именно здесь чаще всего ошибаются. На этой платформе:
 
-| Файловая система | Переживает ребут? |
-|---|---|
-| `/etc` (и `/etc/dropbear`, `/root/.ssh`) | ❌ **RAM-ФС — стирается** |
-| `/data` (ubifs) | ✅ да |
-| `nvram` | ✅ да |
-| `/etc/crontabs` | ✅ да (bind-mount в `/data/etc/crontabs`) |
-| `/etc/shadow`, `/etc/passwd` | ✅ да (bind-mount из `/data/etc`) |
+| Путь | Переживает ребут? | Почему |
+|---|---|---|
+| `/data` (ubifs) | ✅ да | единственная записываемая постоянная ФС |
+| `nvram` (`ssh_en`, `telnet_en`) | ✅ да | отдельный раздел |
+| `/etc/crontabs` | ✅ да | preinit bind-mount из `/data/etc/crontabs` |
+| `/etc/shadow`, `/etc/passwd` | ✅ да | preinit bind-mount из `/data/etc`, поэтому `passwd root` попадает в `/data/etc/shadow` |
+| uci-конфиги (`/etc/config/*`) | ✅ да | лежат на постоянном разделе, применяются со старта |
+| `/etc/dropbear/dropbear_rsa_host_key` | ❌ нет | `/etc` — ramfs |
+| `/etc/dropbear/authorized_keys`, `/root/.ssh/authorized_keys` | ❌ нет | `/etc` и `/root` — ramfs |
+| `/etc/TZ` | ❌ нет | ramfs — часовой пояс откатывался (у нас снова был `CST`) |
+| сырые правила `iptables` | ❌ нет | `fw3 reload` их сбрасывает |
+| процесс `dropbear` | ❌ нет | процесс умирает |
 
 Значит host key и `authorized_keys` надо хранить в `/data` и восстанавливать при загрузке. Мы держим
 их в `/data/root_secret/` и запускаем watchdog по cron раз в минуту:
@@ -860,9 +953,38 @@ netstat -ltn | grep ':22 '
 # tcp  0  0  0.0.0.0:22  0.0.0.0:*  LISTEN
 ```
 
-> У upstream есть аналогичный `boot.sh` + блок crontab — можно взять его. В нашей версии добавлено
-> восстановление `/etc/shadow`, потому что мы столкнулись с тем, что пароль после ребута не
-> возвращался.
+> **Зачем нужен watchdog.** `/etc` — RAM-ФС и при ребуте стирается, но есть важное исключение:
+> preinit bind-mount-ит `/data/etc/passwd`, `/data/etc/shadow` и `/data/etc/crontabs` в `/etc`.
+> Поэтому **root-пароль ребут переживает** (он лежит в `/data/etc/shadow`), и crontab тоже.
+> А вот **host key** dropbear, `authorized_keys` и `/etc/TZ` — **нет**, и сам **процесс**
+> dropbear тоже не переживает.
+>
+> Нюанс: bind-mount `/data/etc/shadow` начинает работать, только когда этот файл уже есть.
+> До этого в `/etc/shadow` лежит заводской хеш, и после ребута пароль может вернуться
+> заводским. Этот зазор и закрывает watchdog: он держит копию в
+> `/data/root_secret/shadow_root` и возвращает её, если хеши разошлись.
+
+> **SSH потерян полностью?** Shell для восстановления не нужен: эксплойт выполняет команды от
+> root по HTTP. Запускаем его снова с `--cmd`, возвращаем файлы из `/data/root_secret` и поднимаем
+> dropbear (nginx снова может ответить `502` — это не провал):
+
+```bash
+python3 tools/exploit_set_macfilter_rules.py --ip 192.168.31.1 \
+    --password 'ПАРОЛЬ_ВЕБ_ПАНЕЛИ' \
+    --cmd 'mkdir -p /etc/dropbear /root/.ssh
+cp /data/root_secret/dropbear_rsa_host_key /etc/dropbear/
+cp /data/root_secret/authorized_keys /etc/dropbear/authorized_keys
+cp /data/root_secret/authorized_keys /root/.ssh/authorized_keys
+/usr/sbin/dropbear -p 22
+sh /data/ssh-boot.sh'
+```
+
+> Дальше проверяем `nc -vz 192.168.31.1 22` и заходим; `/data/ssh-boot.sh` заодно возвращает
+> root-хеш в `/etc/shadow`.
+
+> **Только ключи.** Boot-скрипт поднимает dropbear как `/usr/sbin/dropbear -p 22`, то есть **с**
+> паролями — иначе вход по паролю молча вернулся бы через минуту. Как оставить только ключи —
+> в примечании в конце шага 10.
 
 ### 10. Хардненинг: выключаем OTA и telnet, закрываем WAN
 
@@ -873,14 +995,48 @@ sed -i '/otapredownload/d' /etc/crontabs/root
 uci add_list dhcp.@dnsmasq[0].address='/bigota.miwifi.com/0.0.0.0'; uci commit dhcp
 /etc/init.d/dnsmasq restart
 
-# 2) telnet выключаем (если включали через --telnet)
+# 2) telnet выключаем: одного `nvram commit` мало — он подействует только со следующей загрузки,
+#    поэтому гасим уже запущенный демон
 nvram set telnet_en=0; nvram commit
+killall telnetd 2>/dev/null
+netstat -ltn | grep ':23 ' || echo 'telnet off'
 
-# 3) SSH не должен быть доступен со стороны WAN — закрываем явно
-iptables -I INPUT -i <ВАШ_WAN_ИНТЕРФЕЙС> -p tcp --dport 22 -j DROP
-
-# 4) по желанию: только ключи, без паролей (у dropbear это флаг -s)
+# 3) SSH не должен быть доступен со стороны WAN — штатное правило fw3, а не сырая вставка в iptables
+#    (сырые правила не переживают ребут и сбрасываются при `fw3 reload`)
+uci add firewall rule
+uci set firewall.@rule[-1].name='Block-WAN-SSH'
+uci set firewall.@rule[-1].src='wan'
+uci set firewall.@rule[-1].proto='tcp'
+uci set firewall.@rule[-1].dest_port='22'
+uci set firewall.@rule[-1].target='DROP'
+uci commit firewall
+/etc/init.d/firewall reload
 ```
+
+Проверяем, что правило реально есть — и, уже из LAN, что его счётчик растёт
+(`src='wan'` означает, что правило матчит только трафик, приходящий в зону WAN; если сомневаетесь —
+посмотрите зону):
+
+```bash
+uci show firewall | grep -A6 'Block-WAN-SSH'
+iptables -L INPUT -vn | grep 'dpt:22'
+```
+
+> ⚠️ Не добавляйте это правило, если управляете роутером со стороны WAN, — потеряете доступ к SSH.
+> Добавляйте только из LAN.
+
+Если не хочется трогать конфиг фаервола, сырое правило можно переприменять каждую минуту — но тогда
+оно будет исчезать при каждой перезагрузке, пока cron его не вернёт:
+
+```bash
+echo '* * * * * iptables -C INPUT -i <ВАШ_WAN_ИНТЕРФЕЙС> -p tcp --dport 22 -j DROP || iptables -I INPUT -i <ВАШ_WAN_ИНТЕРФЕЙС> -p tcp --dport 22 -j DROP' >> /etc/crontabs/root
+```
+
+**Только ключи (`dropbear -s`).** Флаг `-s` выключает вход по паролю, но watchdog раз в минуту
+поднимает dropbear как `/usr/sbin/dropbear -p 22` — **без** `-s`. Значит «только ключи» — это не
+состояние по умолчанию: чтобы его сохранить, поменяйте эту строку в `/data/ssh-boot.sh` на
+`/usr/sbin/dropbear -p 22 -s` и убедитесь, что в `/data/root_secret/authorized_keys` лежит рабочий
+ключ, **до** перезапуска dropbear (иначе потеряете доступ; восстановление выше shell не требует).
 
 Очень рекомендуем **бэкап флеша** до изменений: на этой платформе `mtd16` (калибровка Wi-Fi) и
 `mtd21` (bdata: SN/MAC/ключи) нельзя восстановить из официальной прошивки — их потеря = вечный
@@ -945,7 +1101,7 @@ python3 scripts/xiaomi-default-root-password.py --selftest
 ## Как работает эксплойт
 
 ```
-GET/POST /cgi-bin/luci/;stok=<TOKEN>/api/xqsystem/set_macfilter_rules
+GET  /cgi-bin/luci/;stok=<TOKEN>/api/xqsystem/set_macfilter_rules
          ?mac=<валидный MAC>&name=<payload>&option=0
    │
    ├─ обработчик читает `name` через formvalue("name")   ← без regex-проверки
@@ -960,7 +1116,8 @@ GET/POST /cgi-bin/luci/;stok=<TOKEN>/api/xqsystem/set_macfilter_rules
 
 - **Никаких `;`** — контроллер режет `mac`/`name` по `;`. Используйте переводы строк (скрипт так и
   делает).
-- `option` должен быть `0` (add); при `option=1` функция выходит раньше и ничего не выполняется.
+- `option` должен быть `0` (add). При `option=1` **и** MAC, которого ещё нет в таблице
+  фильтра, функция выходит раньше и ничего не выполняет.
 - `mac` — валидный MAC, которого ещё нет в таблице MAC-фильтра (скрипт генерирует случайный).
 - Также работают бэктики, `$( )`, `|` и `&`.
 
@@ -968,8 +1125,8 @@ GET/POST /cgi-bin/luci/;stok=<TOKEN>/api/xqsystem/set_macfilter_rules
 
 | Флаг | Назначение |
 |---|---|
-| `--probe` | только проверка: роутер пингует ваш компьютер (доказывает выполнение, ничего не меняет) |
-| `--telnet` | поднимает `telnetd -l /bin/sh` — **root-shell без пароля**; только в доверенной LAN |
+| `--probe` | только проверка: роутер пингует ваш компьютер (доказывает выполнение, ничего не меняет). Чтобы увидеть эти пакеты, `tcpdump`/`windump` нужно запустить самому (и передать свой адрес через `--target`) |
+| `--telnet` | поднимает `telnetd -l /bin/sh` — root-shell без пароля; перед использованием прочитайте [Прочитать до начала](#прочитать-до-начала) |
 | `--cmd 'id'` | выполнить произвольную команду от root |
 | `--no-auth` | без логина (сначала попросит подтвердить, что устройство ваше) |
 
@@ -980,11 +1137,11 @@ GET/POST /cgi-bin/luci/;stok=<TOKEN>/api/xqsystem/set_macfilter_rules
 | `no matching host key type found. Their offer: ssh-rsa` | ваш OpenSSH не принимает SHA-1 host key | добавьте `-o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa` |
 | `Permission denied (publickey,password)` с вычисленным паролем | пароль не тот / менялся | задайте свой через `--cmd "... | passwd root"` (шаг 6) |
 | Эксплойт вернул `502 Bad Gateway` | таймаут nginx, пока работает `dropbearkey` | это не провал — проверьте `nc -vz <IP> 22` |
-| Эксплойт вернул `{"code":1523}` или другую ошибку | прошивка не уязвима или неверный пароль панели | проверьте пароль панели; попробуйте `--no-auth` |
+| Эксплойт вернул любой ненулевой `code`, например `{"code":1523}` / `{"code":1541}` (мы видели их на *других* эндпоинтах xqsystem) | прошивка не уязвима или неверный пароль панели | проверьте пароль панели; попробуйте `--no-auth` |
 | Порт 22 закрыт после инъекции | `dropbearkey` не отработал или остался файл-заглушка | выполните `--cmd "rm -f /etc/dropbear/dropbear_rsa_host_key; dropbearkey -t rsa -f /etc/dropbear/dropbear_rsa_host_key; /usr/sbin/dropbear -p 22"` |
 | `chpasswd: not found` | в прошивке его нет | используйте `printf 'P\nP\n' | passwd root` |
 | SSH работал и умер после ребута | `/etc` — RAM-ФС | поставьте восстановление из `/data` + cron-watchdog (шаг 9) |
-| После ребута пароль не принимается | `/etc/shadow` откатился вместе с `/etc` | восстановите из `/data/root_secret/shadow_root` (шаг 9) |
+| После ребута пароль не принимается | файла `/data/etc/shadow` ещё не было, и `/etc/shadow` откатился к заводскому хешу | восстановите из `/data/root_secret/shadow_root` (шаг 9) или снова задайте пароль через эксплойт (`--cmd`) |
 | Paramiko и инструменты на нём не подключаются | в Paramiko 5.x убран ssh-rsa | используйте системный `ssh` |
 | Всё сломалось после добавления правил iptables | свои правила в начале цепочки `FORWARD` роняют Qualcomm NSS/ECM (`HLOS Panic` в dmesg) | никогда не делайте `-I FORWARD 1`; используйте штатные правила фаервола, а кастомные цепочки переприменяйте из cron |
 
