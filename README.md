@@ -547,7 +547,7 @@ Useful flags of the upstream script:
 | `Permission denied (publickey,password)` with the derived password | wrong/factory-changed password | set your own via `--cmd "... | passwd root"` (step 6) |
 | Exploit returns `502 Bad Gateway` | nginx CGI timeout while `dropbearkey` runs | not a failure — check `nc -vz <IP> 22` |
 | Exploit returns any non-zero `code`, e.g. `{"code":1523}` / `{"code":1541}` (we saw these on *other* xqsystem endpoints) | firmware not vulnerable, or wrong admin password | verify the panel password; try `--no-auth` |
-| Port 22 closed after injection | `dropbearkey` failed, or host key placeholder still present | run `--cmd "rm -f /etc/dropbear/dropbear_rsa_host_key; dropbearkey -t rsa -f /etc/dropbear/dropbear_rsa_host_key; /usr/sbin/dropbear -p 22"` |
+| Port 22 closed after injection | `dropbearkey` failed, or host key placeholder still present | re-run `--cmd` three times, one command per call (the payload must not contain `;`): `rm -f /etc/dropbear/dropbear_rsa_host_key`, then `dropbearkey -t rsa -f /etc/dropbear/dropbear_rsa_host_key`, then `/usr/sbin/dropbear -p 22` |
 | `chpasswd: not found` | not present in this firmware | use `printf 'P\nP\n' | passwd root` |
 | SSH worked, then died after a reboot | `/etc` is a RAM filesystem | install the `/data` restore + cron watchdog (step 9) |
 | Password no longer accepted after a reboot | `/data/etc/shadow` did not exist yet, so `/etc/shadow` fell back to the factory hash | restore from `/data/root_secret/shadow_root` (step 9), or re-run the exploit with `--cmd` and set the password again |
@@ -1138,7 +1138,7 @@ GET  /cgi-bin/luci/;stok=<TOKEN>/api/xqsystem/set_macfilter_rules
 | `Permission denied (publickey,password)` с вычисленным паролем | пароль не тот / менялся | задайте свой через `--cmd "... | passwd root"` (шаг 6) |
 | Эксплойт вернул `502 Bad Gateway` | таймаут nginx, пока работает `dropbearkey` | это не провал — проверьте `nc -vz <IP> 22` |
 | Эксплойт вернул любой ненулевой `code`, например `{"code":1523}` / `{"code":1541}` (мы видели их на *других* эндпоинтах xqsystem) | прошивка не уязвима или неверный пароль панели | проверьте пароль панели; попробуйте `--no-auth` |
-| Порт 22 закрыт после инъекции | `dropbearkey` не отработал или остался файл-заглушка | выполните `--cmd "rm -f /etc/dropbear/dropbear_rsa_host_key; dropbearkey -t rsa -f /etc/dropbear/dropbear_rsa_host_key; /usr/sbin/dropbear -p 22"` |
+| Порт 22 закрыт после инъекции | `dropbearkey` не отработал или остался файл-заглушка | запустите `--cmd` три раза — по одной команде за вызов (в payload не должно быть `;`): `rm -f /etc/dropbear/dropbear_rsa_host_key`, затем `dropbearkey -t rsa -f /etc/dropbear/dropbear_rsa_host_key`, затем `/usr/sbin/dropbear -p 22` |
 | `chpasswd: not found` | в прошивке его нет | используйте `printf 'P\nP\n' | passwd root` |
 | SSH работал и умер после ребута | `/etc` — RAM-ФС | поставьте восстановление из `/data` + cron-watchdog (шаг 9) |
 | После ребута пароль не принимается | файла `/data/etc/shadow` ещё не было, и `/etc/shadow` откатился к заводскому хешу | восстановите из `/data/root_secret/shadow_root` (шаг 9) или снова задайте пароль через эксплойт (`--cmd`) |
