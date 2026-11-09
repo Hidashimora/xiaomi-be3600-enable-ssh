@@ -1,0 +1,1 @@
+# xiaomi-be3600-enable-ssh
